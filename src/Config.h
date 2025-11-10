@@ -1,26 +1,21 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-#include <string>
+#include <cstdint>
 
-struct Config {
-    std::string authFile = "config/scale.conf";
-    std::string logFile = "log/server.log";
-    int port = 33333;
+class Config {
+public:
+    using data_t = int16_t;  // Для варианта 63 используем int16_t
     
-    // Параметры для int16_t
-    using data_t = int16_t;
-    static constexpr int16_t MAX_VALUE = 32767;
-    static constexpr int16_t MIN_VALUE = -32768;
-    
-    // Параметры аутентификации
-    static constexpr size_t SALT_SIZE = 8;
-    static constexpr size_t SALT_HEX_SIZE = 16;
-    
-    // Константы для сервера
-    static constexpr int DEFAULT_PORT = 33333;
-    static constexpr const char* DEFAULT_USER_DB = "config/scale.conf";
+    // Константы конфигурации сервера
+    static constexpr uint16_t DEFAULT_PORT = 33333;
+    static constexpr const char* DEFAULT_CONFIG_FILE = "config/scale.conf";
     static constexpr const char* DEFAULT_LOG_FILE = "log/server.log";
+    
+    // Константы аутентификации
+    static constexpr int SALT_LENGTH = 16;        // Длина соли в шестнадцатеричных символах
+    static constexpr int HASH_LENGTH = 40;        // Длина хеша SHA-1 в шестнадцатеричных символах
+    static constexpr int LOGIN_LENGTH = 32;       // Максимальная длина логина
 };
 
 #endif

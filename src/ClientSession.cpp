@@ -1,29 +1,141 @@
 #include "ClientSession.h"
-#include <iostream>
-#include <arpa/inet.h>
+#include "Logger.h"
+#include "AuthenticationManager.h"
+#include "DataProcessor.h"
+#include "Config.h"
+#include <unistd.h>
 #include <cstring>
+#include <stdexcept>
+#include <arpa/inet.h>
 
 ClientSession::ClientSession(int socket, const struct sockaddr_in& address, Logger& logger)
     : clientSocket(socket), clientAddress(address), logger(logger) {
     
-    authManager = std::make_unique<AuthenticationManager>();
+    // Передаем ссылку на логгер в AuthenticationManager
+    authManager = std::make_unique<AuthenticationManager>("config/scale.conf", 
+        std::shared_ptr<Logger>(&logger, [](Logger*){}));
     dataProcessor = std::make_unique<DataProcessor>();
-    
-    char clientIP[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &(clientAddress.sin_addr), clientIP, INET_ADDRSTRLEN);
-    
-    logger.info("Создана сессия для клиента: " + std::string(clientIP) + ":" + 
-                std::to_string(ntohs(clientAddress.sin_port)));
 }
 
 ClientSession::~ClientSession() {
     closeConnection();
 }
 
-void ClientSession::closeConnection() {
-    if (clientSocket != -1) {
-        close(clientSocket);
-        clientSocket = -1;
+void ClientSession::handle() {
+    try {
+        char ipStr[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &(clientAddress.sin_addr), ipStr, INET_ADDRSTRLEN);
+        logger.info("Клиент подключен: " + std::string(ipStr) + ":" + 
+                   std::to_string(ntohs(clientAddress.sin_port)));
+        
+        // Аутентификация
+        if (!authenticateClient()) {
+            throw std::runtime_error("Аутентификация не удалась");
+        }
+        
+        // Обработка данных
+        if (!processDataExchange()) {
+            throw std::runtime_error("Ошибка обработки данных");
+        }
+        
+        logger.info("Сессия завершена успешно");
+        
+    } catch (const std::exception& e) {
+        logger.error("Ошибка сессии: " + std::string(e.what()));
+        throw;
+    }
+}
+
+bool ClientSession::authenticateClient() {
+    try {
+        // Чтение аутентификационных данных
+        char authBuffer[1024];
+        if (!receiveAll(authBuffer, Config::LOGIN_LENGTH + Config::SALT_LENGTH + Config::HASH_LENGTH)) {
+            throw std::runtime_error("Не удалось прочитать аутентификационные данные");
+        }
+        
+        std::string authData(authBuffer, Config::LOGIN_LENGTH + Config::SALT_LENGTH + Config::HASH_LENGTH);
+        
+        // Аутентификация
+        bool result = authManager->authenticate(authData);
+        
+        if (result) {
+            const char* okResponse = "OK";
+            if (!sendAll(okResponse, 2)) {
+                throw std::runtime_error("Не удалось отправить ответ OK");
+            }
+            logger.info("Аутентификация успешна");
+            authenticated = true;
+        } else {
+            const char* errResponse = "ERR";
+            if (!sendAll(errResponse, 3)) {
+                throw std::runtime_error("Не удалось отправить ответ ERR");
+            }
+            logger.warning("Аутентификация не удалась");
+        }
+        
+        return result;
+        
+    } catch (const std::exception& e) {
+        logger.error("Ошибка аутентификации: " + std::string(e.what()));
+        return false;
+    }
+}
+
+bool ClientSession::processDataExchange() {
+    if (!authenticated) {
+        throw std::runtime_error("Попытка обработки данных без аутентификации");
+    }
+    
+    try {
+        // Чтение количества векторов
+        uint32_t vectorCount;
+        if (!receiveAll(&vectorCount, sizeof(vectorCount))) {
+            throw std::runtime_error("Не удалось прочитать количество векторов");
+        }
+        vectorCount = ntohl(vectorCount);
+        
+        std::vector<std::vector<Config::data_t>> vectors;
+        vectors.reserve(vectorCount);
+        
+        // Чтение каждого вектора
+        for (uint32_t i = 0; i < vectorCount; ++i) {
+            // Чтение размера вектора
+            uint32_t vectorSize;
+            if (!receiveAll(&vectorSize, sizeof(vectorSize))) {
+                throw std::runtime_error("Не удалось прочитать размер вектора");
+            }
+            vectorSize = ntohl(vectorSize);
+            
+            // Чтение данных вектора
+            std::vector<Config::data_t> vector(vectorSize);
+            if (!receiveAll(vector.data(), vectorSize * sizeof(Config::data_t))) {
+                throw std::runtime_error("Не удалось прочитать данные вектора");
+            }
+            
+            vectors.push_back(std::move(vector));
+        }
+        
+        // Обработка данных
+        auto results = dataProcessor->processVectors(vectors);
+        
+        // Отправка результатов
+        uint32_t resultCount = htonl(results.size());
+        if (!sendAll(&resultCount, sizeof(resultCount))) {
+            throw std::runtime_error("Не удалось отправить количество результатов");
+        }
+        
+        for (const auto& result : results) {
+            if (!sendAll(&result, sizeof(result))) {
+                throw std::runtime_error("Не удалось отправить результат");
+            }
+        }
+        
+        return true;
+        
+    } catch (const std::exception& e) {
+        logger.error("Ошибка обработки данных: " + std::string(e.what()));
+        return false;
     }
 }
 
@@ -55,140 +167,9 @@ bool ClientSession::sendAll(const void* buffer, size_t length) {
     return true;
 }
 
-bool ClientSession::authenticateClient() {
-    // Получаем размер сообщения аутентификации
-    uint32_t msgSize;
-    if (!receiveAll(&msgSize, sizeof(msgSize))) {
-        logger.error("Ошибка получения размера сообщения аутентификации");
-        return false;
-    }
-    msgSize = ntohl(msgSize);
-    
-    // Получаем само сообщение
-    std::vector<char> authBuffer(msgSize + 1);
-    if (!receiveAll(authBuffer.data(), msgSize)) {
-        logger.error("Ошибка получения сообщения аутентификации");
-        return false;
-    }
-    authBuffer[msgSize] = '\0';
-    std::string authMessage(authBuffer.data());
-    
-    // Парсим сообщение: LOGIN + SALT(16 hex) + HASH(40 hex)
-    if (authMessage.length() < 1 + AuthenticationManager::SALT16_SIZE + 40) {
-        logger.error("Слишком короткое сообщение аутентификации");
-        return false;
-    }
-    
-    size_t loginSize = authMessage.length() - AuthenticationManager::SALT16_SIZE - 40;
-    std::string login = authMessage.substr(0, loginSize);
-    std::string salt = authMessage.substr(loginSize, AuthenticationManager::SALT16_SIZE);
-    std::string clientHash = authMessage.substr(loginSize + AuthenticationManager::SALT16_SIZE, 40);
-    
-    // Аутентифицируем
-    if (!authManager->authenticate(login, salt, clientHash)) {
-        std::string errorMsg = "ERR";
-        sendAll(errorMsg.c_str(), errorMsg.length());
-        return false;
-    }
-    
-    // Отправляем подтверждение
-    std::string successMsg = "OK";
-    if (!sendAll(successMsg.c_str(), successMsg.length())) {
-        logger.error("Ошибка отправки подтверждения аутентификации");
-        return false;
-    }
-    
-    authenticated = true;
-    logger.info("Клиент аутентифицирован: " + login);
-    return true;
-}
-
-bool ClientSession::processDataExchange() {
-    if (!authenticated) {
-        logger.error("Попытка обмена данными без аутентификации");
-        return false;
-    }
-    
-    // Получаем количество векторов
-    uint32_t vectorCount;
-    if (!receiveAll(&vectorCount, sizeof(vectorCount))) {
-        logger.error("Ошибка получения количества векторов");
-        return false;
-    }
-    vectorCount = ntohl(vectorCount);
-    
-    std::vector<std::vector<Config::data_t>> vectors;
-    
-    // Получаем каждый вектор
-    for (uint32_t i = 0; i < vectorCount; ++i) {
-        // Получаем размер вектора
-        uint32_t vectorSize;
-        if (!receiveAll(&vectorSize, sizeof(vectorSize))) {
-            logger.error("Ошибка получения размера вектора " + std::to_string(i));
-            return false;
-        }
-        vectorSize = ntohl(vectorSize);
-        
-        // Получаем данные вектора
-        std::vector<Config::data_t> vector(vectorSize);
-        if (!receiveAll(vector.data(), vectorSize * sizeof(Config::data_t))) {
-            logger.error("Ошибка получения данных вектора " + std::to_string(i));
-            return false;
-        }
-        
-        // Конвертируем из сетевого порядка байт
-        for (auto& value : vector) {
-            value = ntohs(value);
-        }
-        
-        vectors.push_back(vector);
-    }
-    
-    // Обрабатываем векторы
-    auto results = dataProcessor->processVectors(vectors);
-    
-    // Отправляем результаты
-    uint32_t resultCount = htonl(results.size());
-    if (!sendAll(&resultCount, sizeof(resultCount))) {
-        logger.error("Ошибка отправки количества результатов");
-        return false;
-    }
-    
-    for (auto result : results) {
-        Config::data_t netResult = htons(result);
-        if (!sendAll(&netResult, sizeof(netResult))) {
-            logger.error("Ошибка отправки результата");
-            return false;
-        }
-    }
-    
-    logger.info("Обработано векторов: " + std::to_string(vectorCount) + 
-                ", результатов: " + std::to_string(results.size()));
-    return true;
-}
-
-void ClientSession::handle() {
-    logger.info("Начало обработки клиентской сессии");
-    
-    try {
-        if (!authManager->initialize()) {
-            logger.error("Ошибка инициализации менеджера аутентификации");
-            return;
-        }
-        
-        if (!authenticateClient()) {
-            logger.error("Ошибка аутентификации клиента");
-            return;
-        }
-        
-        if (!processDataExchange()) {
-            logger.error("Ошибка обработки данных");
-            return;
-        }
-        
-        logger.info("Сессия успешно завершена");
-        
-    } catch (const std::exception& e) {
-        logger.error("Исключение в клиентской сессии: " + std::string(e.what()));
+void ClientSession::closeConnection() {
+    if (clientSocket != -1) {
+        close(clientSocket);
+        clientSocket = -1;
     }
 }

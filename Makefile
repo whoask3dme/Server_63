@@ -1,12 +1,7 @@
 # Компилятор и флаги
 CXX = g++
 CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -g
-LIBS = -lssl -lcrypto -lpthread
-
-# Компилятор и флаги
-CXX = g++
-CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -g
-LIBS = -lssl -lcrypto -lpthread
+LIBS = -lssl -lcrypto -lpthread -lboost_program_options
 
 # Директории
 SRCDIR = src
@@ -43,11 +38,11 @@ all: $(TARGET)
 
 # Запуск сервера с параметрами по умолчанию
 run: all $(LOGDIR)
-	./$(BINDIR)/server
+	./$(TARGET)
 
 # Запуск с конкретным портом
 run-port: all $(LOGDIR)
-	./$(BINDIR)/server -p 44444
+	./$(TARGET) -p 44444
 
 # Очистка
 clean:
@@ -59,7 +54,7 @@ distclean: clean
 # Установка зависимостей (для Ubuntu/Debian)
 install-deps:
 	sudo apt-get update
-	sudo apt-get install libssl-dev build-essential
+	sudo apt-get install -y libssl-dev build-essential libboost-program-options-dev
 
 # Создание конфигурационного файла
 create-config:
@@ -68,7 +63,7 @@ create-config:
 	@echo "# Файл базы пользователей сервера" > $(CONFIGDIR)/scale.conf
 	@echo "# Формат: логин:пароль" >> $(CONFIGDIR)/scale.conf
 	@echo "" >> $(CONFIGDIR)/scale.conf
-	@echo "user:P@ssWOrd" >> $(CONFIGDIR)/scale.conf
+	@echo "user:P@ssWord" >> $(CONFIGDIR)/scale.conf
 	@echo "testuser:testpass123" >> $(CONFIGDIR)/scale.conf
 	@echo "admin:admin123" >> $(CONFIGDIR)/scale.conf
 	@echo "user1:secret123" >> $(CONFIGDIR)/scale.conf
@@ -77,7 +72,7 @@ create-config:
 
 # Отладочная сборка
 debug: CXXFLAGS += -DDEBUG -Og
-debug: $(TARGET)
+debug: clean all
 
 # Показать структуру проекта
 tree:
@@ -96,18 +91,18 @@ tree:
 # Тестирование сервера (запуск в фоне)
 test-server: all $(LOGDIR)
 	@echo "Запуск сервера для тестирования на порту 33333..."
-	./$(BINDIR)/server -p 33333 &
+	./$(TARGET) -p 33333 &
 	@sleep 2
 
 # Остановка тестового сервера
 stop-test:
-	@pkill server || true
+	@pkill -f "$(TARGET)" || true
 	@echo "Сервер остановлен"
 
 # Проверка порта
 check-port:
 	@echo "Проверка открытых портов..."
-	@netstat -tlnp | grep 33333 || echo "Порт 33333 не занят"
+	@netstat -tlnp | grep :33333 || echo "Порт 33333 не занят"
 
 # Просмотр логов
 logs:
@@ -117,7 +112,7 @@ logs:
 		echo "Лог-файл не найден"; \
 	fi
 
-# Быстрое просмотр последних логов
+# Быстрый просмотр последних логов
 log-tail:
 	@if [ -f "$(LOGDIR)/server.log" ]; then \
 		tail -20 $(LOGDIR)/server.log; \
@@ -136,5 +131,13 @@ test: test-server
 restart: stop-test test-server
 	@echo "Сервер перезапущен"
 
+# Информация о сборке
+info:
+	@echo "Компилятор: $(CXX)"
+	@echo "Флаги: $(CXXFLAGS)"
+	@echo "Библиотеки: $(LIBS)"
+	@echo "Исходные файлы: $(SOURCES)"
+	@echo "Объектные файлы: $(OBJECTS)"
+
 .PHONY: all run run-port clean distclean install-deps create-config debug tree \
-        test-server stop-test check-port logs log-tail test restart
+        test-server stop-test check-port logs log-tail test restart info
